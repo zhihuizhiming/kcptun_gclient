@@ -21,9 +21,11 @@ type
     FReadFromPipeStr: string;   //从控制台管道中读出的字符串
     FCommandLine: string;       //待执行的命令行
     FCMDHandle: THandle;        //控制台程序句柄
+    FCMDPID: Cardinal;          //控制台PID
     FMemo_Log: TMemo;
     FCorrectQuit: Boolean;      //是否是正常的退出
 
+    procedure MySleep(Timeout: Integer);
     procedure SetMemo_log(const Value: TMemo);
 
     procedure InputToMemo;
@@ -36,6 +38,7 @@ type
     property Owner: TObject read FOwner write FOwner;
     property MainFormHandle: THandle read FMainFormHandle write FMainFormHandle;
     property CMDHandle: THandle read FCMDHandle;
+    property CMDPID: Cardinal read FCMDPID;
     property Memo_Log: TMemo read FMemo_Log write SetMemo_log;
     property CorrectQuit: Boolean read FCorrectQuit write FCorrectQuit;
 
@@ -54,6 +57,17 @@ uses
   PublicVar;
 
 { TExecDOSCommand_Thread }
+
+procedure TExecDOSCommand_Thread.MySleep(Timeout: Integer);
+var
+  DeadLine: TDateTime;
+begin
+  DeadLine:= Now + Timeout / 86400000;
+  while (not FCorrectQuit) and (Now <= DeadLine) do
+    begin
+      Application.ProcessMessages;
+    end;
+end;
 
 procedure TExecDOSCommand_Thread.SetMemo_log(const Value: TMemo);
 begin
@@ -109,6 +123,7 @@ begin
       if CreateProcess(nil, PChar(ACommand + ' ' + AParameters), @saSecurity, @saSecurity, true, NORMAL_PRIORITY_CLASS, nil, nil, suiStartup, piProcess) then
         try
           FCMDHandle:= piProcess.hProcess;
+          FCMDPID:= piProcess.dwProcessId;
           repeat
             dRunning:= WaitForSingleObject(piProcess.hProcess, 100);
             PeekNamedPipe(hRead, nil, 0, nil, @dAvailable, nil);
@@ -122,6 +137,7 @@ begin
               until (dRead < CReadBuffer);
             Application.ProcessMessages;
           until (dRunning <> WAIT_TIMEOUT);
+          FCMDPID:= 0;
         finally
           CloseHandle(piProcess.hProcess);
           CloseHandle(piProcess.hThread);
@@ -179,36 +195,43 @@ begin
   FThreadState:= 1;
   FCorrectQuit:= False;
   try
-    FReadFromPipeStr:= '执行命令：' + FCommandLine + #13 + #10;
-    AppendOutputToLog(FReadFromPipeStr);
-    Synchronize(InputToMemo);
-    if Length(FCommandLine) > MaxCommandLen then
-      begin
-        FReadFromPipeStr:= '命令行字符数大于所允许的最大长度，命令中止！' + #13 + #10;
-        AppendOutputToLog(FReadFromPipeStr);
-        Synchronize(InputToMemo);
-      end
-    else
-      begin
-        FReadFromPipeStr:= '*************************** begin ***************************' + #13 + #10;
-        AppendOutputToLog(FReadFromPipeStr);
-        Synchronize(InputToMemo);
+    repeat
+      FReadFromPipeStr:= '执行命令：' + FCommandLine + #13 + #10;
+      AppendOutputToLog(FReadFromPipeStr);
+      Synchronize(InputToMemo);
+      if Length(FCommandLine) > MaxCommandLen then
+        begin
+          FReadFromPipeStr:= '命令行字符数大于所允许的最大长度，命令中止！' + #13 + #10;
+          AppendOutputToLog(FReadFromPipeStr);
+          Synchronize(InputToMemo);
+        end
+      else
+        begin
+          FReadFromPipeStr:= '*************************** begin ***************************' + #13 + #10;
+          AppendOutputToLog(FReadFromPipeStr);
+          Synchronize(InputToMemo);
 
-        CaptureConsoleOutput(FCommandLine, '',
-          procedure(const Line: PAnsiChar)
-            begin
-              FReadFromPipeStr:= string(Line);
-              AppendOutputToLog(FReadFromPipeStr);
-              Synchronize(InputToMemo);
-            end
-        );
-      end;
-    FReadFromPipeStr:= '**************************** end ****************************' + #13 + #10 + #13 + #10;
-    AppendOutputToLog(FReadFromPipeStr);
-    Synchronize(InputToMemo);
+          CaptureConsoleOutput(FCommandLine, '',
+            procedure(const Line: PAnsiChar)
+              begin
+                FReadFromPipeStr:= string(Line);
+                AppendOutputToLog(FReadFromPipeStr);
+                Synchronize(InputToMemo);
+              end
+          );
+        end;
+      FReadFromPipeStr:= '**************************** end ****************************' + #13 + #10 + #13 + #10;
+      AppendOutputToLog(FReadFromPipeStr);
+      Synchronize(InputToMemo);
 
-    if (not FCorrectQuit) then
-      PostMessage(FMainFormHandle, WM_DOSCOMMANDSTOP, 0, LPARAM(FOwner));
+      if (not FCorrectQuit) then
+        begin
+          if (PublicVar.AutoConn = 0) then
+            PostMessage(FMainFormHandle, WM_DOSCOMMANDSTOP, 0, LPARAM(FOwner))
+          else
+            MySleep(PublicVar.AutoConnTime * 1000);
+        end;
+    until (Terminated or FCorrectQuit or (PublicVar.AutoConn = 0));
 
     FThreadState:= 2;
     while not Terminated do
